@@ -220,7 +220,19 @@
               return NodeFilter.FILTER_REJECT;
             }
             const text = node.textContent;
-            if (text && (text.includes('$$') || text.includes('$') || text.includes('\\(') || text.includes('\\['))) {
+            if (!text) return NodeFilter.FILTER_REJECT;
+            // 原始模式: $$, $, \(, \[
+            if (text.includes('$$') || text.includes('$') || text.includes('\\(') || text.includes('\\[')) {
+              return NodeFilter.FILTER_ACCEPT;
+            }
+            // CommonMark 转义后的模式: \[ → [, \] → ]
+            // 检测 [内含\LaTeX命令] 形如 [\sum_{n=1}...]
+            if (/\[[^\[\]]*\\[a-zA-Z]/.test(text)) {
+              return NodeFilter.FILTER_ACCEPT;
+            }
+            // CommonMark 转义后的模式: \( → (, \) → )
+            // 检测含有 \LaTeX命令(2+字母, 含\mu \pi等) 的文本节点, 可能来自 \(...\)
+            if (/\\[a-zA-Z]{2,}/.test(text)) {
               return NodeFilter.FILTER_ACCEPT;
             }
             return NodeFilter.FILTER_REJECT;
@@ -295,12 +307,38 @@
             const cleaned = content.replace(/\s+/g, ' ').trim();
             const looksLikeLatex = cleaned.length <= 2 || cleaned.includes('\\') ||
               cleaned.includes('_') || cleaned.includes('^') || cleaned.includes('{') ||
-              /\b(alpha|beta|gamma|delta|theta|lambda|mu|sigma|pi|omega|sum|int|frac|sqrt)\b/i.test(cleaned);
+              /\b(alpha|beta|gamma|delta|theta|lambda|mu|sigma|pi|omega|sum|int|frac|sqrt)\b/i.test(cleaned) ||
+              // 单字母变量数学式: 含 = 且无连续小写字母(排除自然语言单词)
+              (cleaned.includes('=') && !/[a-z]{2,}/.test(cleaned));
             if (!looksLikeLatex) return match;
             hasFormula = true;
             try {
               let fixed = cleaned.replace(/\\ (?=[a-zA-Z0-9_{}])/g, '\\\\ ');
               return katex.renderToString(fixed, { displayMode: false, throwOnError: false });
+            } catch { return match; }
+          });
+
+          // 修复 CommonMark 转义: \[...\] 被渲染为 [...] (\[ → [, \] → ])
+          // (?<!\w) 防止误匹配 \left[...] 中 t 后面的 [
+          resultHTML = resultHTML.replace(/(?<!\w)\[([^\[\]]{3,600})\](?!\w)/g, (match, formula) => {
+            const trimmed = formula.trim();
+            if (!/\\[a-zA-Z]/.test(trimmed)) return match;
+            hasFormula = true;
+            try {
+              return katex.renderToString(trimmed, { displayMode: true, throwOnError: false });
+            } catch { return match; }
+          });
+
+          // 修复 CommonMark 转义: \(...\) 被渲染为 (...) (\( → (, \) → ))
+          // (?<!\w) 防止误匹配 \left(...) 中 t 后面的 ( 以及 f(x) 等函数调用
+          resultHTML = resultHTML.replace(/(?<!\w)\(([^()]*(?:\([^()]*\)[^()]*)*)\)(?!\w)/g, (match, formula) => {
+            const trimmed = formula.trim();
+            const cmdCount = (trimmed.match(/\\[a-zA-Z]+/g) || []).length;
+            const hasMathOp = /[=+\-^_<>]/.test(trimmed);
+            if (cmdCount < 1 || (cmdCount < 2 && !hasMathOp)) return match;
+            hasFormula = true;
+            try {
+              return katex.renderToString(trimmed, { displayMode: false, throwOnError: false });
             } catch { return match; }
           });
 
