@@ -6,6 +6,37 @@
 (function() {
   'use strict';
 
+  // ========================================================================
+  // Phase 1 DIAGNOSTIC: capture-phase 'message' listener to inspect payloads
+  // ========================================================================
+  // CC webview 接收消息: window.addEventListener('message', G => if (G.data.type === 'from-extension') enqueue(G.data.message))
+  // 在 capture 阶段注册 listener 比 CC 的 bubble 阶段 listener 先触发 →
+  // 可以看到 AI 响应原始 payload (在 CC 的 marked.parse 吃掉 \, \; 之前)
+  const __enhanceMsgLog = [];
+  const __enhanceMsgLogMax = 30;
+  try {
+    window.addEventListener('message', function __enhanceCaptureListener(ev) {
+      if (!ev || !ev.data) return;
+      if (ev.data.type !== 'from-extension') return;
+      try {
+        // 深拷贝 (避免引用导致后续变更污染 log)
+        const cloned = JSON.parse(JSON.stringify(ev.data.message));
+        __enhanceMsgLog.push({
+          t: new Date().toISOString(),
+          msg: cloned,
+        });
+        while (__enhanceMsgLog.length > __enhanceMsgLogMax) __enhanceMsgLog.shift();
+      } catch (e) {
+        __enhanceMsgLog.push({ t: new Date().toISOString(), err: String(e) });
+      }
+    }, true);  // capture = true
+    console.log('[Claude Enhance] Message capture hook installed (diagnostic mode)');
+  } catch (e) {
+    console.error('[Claude Enhance] Failed to install message hook:', e);
+  }
+  // Expose for debugging
+  window.__enhanceMsgLog = __enhanceMsgLog;
+
   // KaTeX 宏表 — 所有 katex.renderToString 调用共享
   // 两类: (1) siunitx 风格单位宏, (2) 常见 LaTeX 包命令的 KaTeX 别名
   //       (KaTeX 只支持核心 LaTeX 语法, 其他包的命令需要手工桥接)
@@ -1184,6 +1215,29 @@
         e.preventDefault();
         exportKatexSources();
       }
+      // Ctrl+Shift+M 导出捕获的 from-extension 消息流 (Phase 1 诊断)
+      if (e.ctrlKey && e.shiftKey && e.key === 'M') {
+        e.preventDefault();
+        exportMessageLog();
+      }
+    });
+  }
+
+  // Phase 1: 导出 from-extension 消息 payload
+  function exportMessageLog() {
+    const log = window.__enhanceMsgLog || [];
+    const out = JSON.stringify({
+      timestamp: new Date().toISOString(),
+      count: log.length,
+      messages: log,
+    }, null, 2);
+    navigator.clipboard.writeText(out).then(() => {
+      showNotification(`捕获到 ${log.length} 条消息. 粘贴给 Claude 分析 payload 结构.`);
+      console.log(`[Claude Enhance] Exported ${log.length} from-extension messages`);
+    }).catch(err => {
+      console.error('[Claude Enhance] Copy failed:', err);
+      console.log(out);
+      showNotification('复制失败, 查看控制台');
     });
   }
 
