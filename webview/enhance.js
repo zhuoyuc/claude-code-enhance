@@ -169,6 +169,20 @@
     return tex.replace(/\\\\([,;!:])/g, '\\$1');
   }
 
+  // 零参数数学符号 — 若后面直接跟 {letters}, 几乎一定是下标 _{letters} 被吞
+  // 不包括 \text/\mathrm/\frac 等取 {arg} 的函数命令
+  const ZERO_ARG_SYMBOLS = [
+    'alpha','beta','gamma','delta','epsilon','varepsilon','zeta','eta','theta','vartheta',
+    'iota','kappa','lambda','mu','nu','xi','pi','varpi','rho','varrho','sigma','varsigma',
+    'tau','upsilon','phi','varphi','chi','psi','omega',
+    'Gamma','Delta','Theta','Lambda','Xi','Pi','Sigma','Upsilon','Phi','Psi','Omega',
+    'partial','nabla','infty',
+  ];
+  const ZERO_ARG_SUB_RE = new RegExp(
+    '(\\\\(?:' + ZERO_ARG_SYMBOLS.join('|') + '))\\s*\\{([^{}\\\\]{1,20})\\}',
+    'g'
+  );
+
   // (3) 恢复缺失的 _ 下标
   function restoreMissingSubscript(tex) {
     // A. 定界符 | 后直接接 { 或字母/命令 → _
@@ -176,6 +190,9 @@
     //    \bigg|P  → \bigg|_P   (envelope theorem 等场景)
     tex = tex.replace(/(\\(?:[Bb]ig{1,2}|left|right)\s*\|)\{/g, '$1_{');
     tex = tex.replace(/(\\(?:[Bb]ig{1,2}|left|right)\s*\|)(?=[A-Za-z\\])/g, '$1_');
+    // A2. 零参数数学符号后直接跟 {letters}: 几乎一定是下标被吞
+    //     \varepsilon{yy} → \varepsilon_{yy}
+    tex = tex.replace(ZERO_ARG_SUB_RE, '$1_{$2}');
     // B. 大运算符后直接接 \text/\mathrm  → 加 _
     //    \int\text{top} → \int_\text{top}
     tex = tex.replace(

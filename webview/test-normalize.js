@@ -120,12 +120,29 @@ function stripEscapedBackslashPunct(tex) {
   return tex.replace(/\\\\([,;!:])/g, '\\$1');
 }
 
+// 零参数数学符号 — 若后面直接跟 {letters}, 几乎一定是下标 _{letters} 被吞
+// \varepsilon{yy} → \varepsilon_{yy}   \sigma{ij} → \sigma_{ij}
+// 不包括 \text/\mathrm/\frac 等取 {arg} 的函数命令
+const ZERO_ARG_SYMBOLS = [
+  'alpha','beta','gamma','delta','epsilon','varepsilon','zeta','eta','theta','vartheta',
+  'iota','kappa','lambda','mu','nu','xi','pi','varpi','rho','varrho','sigma','varsigma',
+  'tau','upsilon','phi','varphi','chi','psi','omega',
+  'Gamma','Delta','Theta','Lambda','Xi','Pi','Sigma','Upsilon','Phi','Psi','Omega',
+  'partial','nabla','infty',
+];
+const ZERO_ARG_SUB_RE = new RegExp(
+  '(\\\\(?:' + ZERO_ARG_SYMBOLS.join('|') + '))\\s*\\{([^{}\\\\]{1,20})\\}',
+  'g'
+);
+
 function restoreMissingSubscript(tex) {
   // A. 定界符 | 后直接接 { 或字母/命令 → _
   //    \Big|{X} → \Big|_{X}
   //    \bigg|P  → \bigg|_P   (在 envelope theorem, eval bar 等物理/热力学语境)
   tex = tex.replace(/(\\(?:[Bb]ig{1,2}|left|right)\s*\|)\{/g, '$1_{');
   tex = tex.replace(/(\\(?:[Bb]ig{1,2}|left|right)\s*\|)(?=[A-Za-z\\])/g, '$1_');
+  // A2. 零参数数学符号后直接跟 {letters}: 几乎一定是下标 _ 被吞
+  tex = tex.replace(ZERO_ARG_SUB_RE, '$1_{$2}');
 
   // B. 大运算符 \int/\sum/... 后直接接 \text/\mathrm → 加 _
   //    \int\text{top} → \int_\text{top}
@@ -271,6 +288,28 @@ const cases = [
     name: '矩阵 \\\\ 换行 (后接换行/空格/字母) 不动',
     in:  '\\begin{matrix} a & b \\\\ c & d \\end{matrix}',
     out: '\\begin{matrix} a & b \\\\ c & d \\end{matrix}',
+  },
+
+  // ---------- 用户实测: 表格单元格里下标 _ 被吞 ----------
+  {
+    name: '零参数符号后缺失 _ 下标 (ε/σ 等)',
+    in:  '\\varepsilon{yy}^{(2)} = -P/E',
+    out: '\\varepsilon_{yy}^{(2)} = -P/E',
+  },
+  {
+    name: '完整 mangled 不等式 (|neq + 缺 _)',
+    in:  '\\varepsilon_{yy}^{(1)} = -P/E\'_1 |neq |varepsilon{yy}^{(2)} = -P/E\'_2',
+    out: '\\varepsilon_{yy}^{(1)} = -P/E\'_1 \\neq \\varepsilon_{yy}^{(2)} = -P/E\'_2',
+  },
+  {
+    name: '\\text{...} 不能误改 (text 是有参命令, 不是零参符号)',
+    in:  '\\text{prescribed} + \\mathrm{d}A',
+    out: '\\text{prescribed} + \\mathrm{d}A',
+  },
+  {
+    name: '\\frac{a}{b} 不能误改 (frac 有 2 个参数)',
+    in:  '\\frac{a}{b} + \\sigma{ij}',
+    out: '\\frac{a}{b} + \\sigma_{ij}',
   },
 ];
 
