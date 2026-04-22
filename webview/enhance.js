@@ -7,35 +7,156 @@
   'use strict';
 
   // ========================================================================
-  // Phase 1 DIAGNOSTIC: capture-phase 'message' listener to inspect payloads
+  // Phase 2 ROOT-CAUSE FIX: intercept AI message payload BEFORE marked runs
   // ========================================================================
   // CC webview 接收消息: window.addEventListener('message', G => if (G.data.type === 'from-extension') enqueue(G.data.message))
-  // 在 capture 阶段注册 listener 比 CC 的 bubble 阶段 listener 先触发 →
-  // 可以看到 AI 响应原始 payload (在 CC 的 marked.parse 吃掉 \, \; 之前)
+  // 我们在 capture 阶段注册 listener (先于 CC 的 bubble listener),
+  // 把每条 assistant/user 消息的 content.text 里的 $...$ 和 $$...$$
+  // 替换为占位符 §§CEMATH<id>§§, 把原始 TeX 源码存在 map 里.
+  // marked 把占位符当作普通字符串, 不会触发 backslash escape / emphasis /
+  // list / code span 等任何 markdown 解析. 最后 enhance.js 在 DOM 里
+  // 扫占位符, 用原始 TeX 源码渲染 KaTeX. 从根本上消除所有 mangle.
+  //
+  // 额外: 保留 msg log (最近 30 条) 用于诊断.
+
+  const MATH_STORE = new Map();  // id → { mode: 'inline'|'display', src: '<raw TeX>' }
+  let __mathIdCounter = 0;
+  const MATH_PLACEHOLDER_PREFIX = '§§CEMATH';
+  const MATH_PLACEHOLDER_SUFFIX = '§§';
+
+  // 保护 raw markdown 里的数学块: 返回占位符替换后的文本
+  function protectMathInMarkdown(text) {
+    if (typeof text !== 'string' || text.length === 0) return text;
+    let out = text;
+    // $$...$$ 先替换 (display) — 非贪婪, 跨行允许
+    out = out.replace(/\$\$([\s\S]+?)\$\$/g, (_m, src) => {
+      const id = ++__mathIdCounter;
+      MATH_STORE.set(id, { mode: 'display', src });
+      return MATH_PLACEHOLDER_PREFIX + id + MATH_PLACEHOLDER_SUFFIX;
+    });
+    // $...$ (inline) — 不跨行, 不夸 $, 长度合理
+    // 避开数字货币 "$100" 这类情况: 内容不能纯数字
+    out = out.replace(/\$([^$\n]{1,400}?)\$/g, (match, src) => {
+      // 跳过纯数字/货币: $5, $100, $1,000 等
+      if (/^\s*\d[\d.,\s]*\s*$/.test(src)) return match;
+      const id = ++__mathIdCounter;
+      MATH_STORE.set(id, { mode: 'inline', src });
+      return MATH_PLACEHOLDER_PREFIX + id + MATH_PLACEHOLDER_SUFFIX;
+    });
+    // \(...\) 和 \[...\] 也保护 (部分 AI 会这么写)
+    out = out.replace(/\\\(([\s\S]+?)\\\)/g, (_m, src) => {
+      const id = ++__mathIdCounter;
+      MATH_STORE.set(id, { mode: 'inline', src });
+      return MATH_PLACEHOLDER_PREFIX + id + MATH_PLACEHOLDER_SUFFIX;
+    });
+    out = out.replace(/\\\[([\s\S]+?)\\\]/g, (_m, src) => {
+      const id = ++__mathIdCounter;
+      MATH_STORE.set(id, { mode: 'display', src });
+      return MATH_PLACEHOLDER_PREFIX + id + MATH_PLACEHOLDER_SUFFIX;
+    });
+    return out;
+  }
+
+  // 递归处理 content (可能是 string 或 block 数组)
+  function protectContentInPlace(content) {
+    if (typeof content === 'string') return protectMathInMarkdown(content);
+    if (!Array.isArray(content)) return content;
+    for (const block of content) {
+      if (!block || typeof block !== 'object') continue;
+      if (block.type === 'text' && typeof block.text === 'string') {
+        block.text = protectMathInMarkdown(block.text);
+      } else if (block.type === 'thinking' && typeof block.thinking === 'string') {
+        block.thinking = protectMathInMarkdown(block.thinking);
+      }
+    }
+    return content;
+  }
+
+  // 处理单条 message 对象 ({role, content}) 或 msg entry ({type, message})
+  function protectMessageEntry(entry) {
+    if (!entry || typeof entry !== 'object') return;
+    // entry 本身可能是 {role, content} 形式或 {type, message: {role, content}} 形式
+    const m = entry.message || entry;
+    if (!m || typeof m !== 'object') return;
+    if (m.content !== undefined) {
+      const r = protectContentInPlace(m.content);
+      if (typeof r === 'string') m.content = r;
+    }
+  }
+
+  // 根据 payload 类型决定处理哪些字段
+  function protectPayload(payload) {
+    if (!payload || typeof payload !== 'object') return;
+
+    // get_session_response: payload.response.messages 是一个大数组
+    if (payload.type === 'response' && payload.response && payload.response.type === 'get_session_response') {
+      const msgs = payload.response.messages;
+      if (Array.isArray(msgs)) {
+        for (const m of msgs) protectMessageEntry(m);
+      }
+    }
+
+    // 其他可能含 AI 文本的 payload 类型 (streaming delta 等) — 用通用策略:
+    // 扫 response / request 顶层含 messages / message / content 字段
+    if (payload.response) {
+      const r = payload.response;
+      if (Array.isArray(r.messages)) {
+        for (const m of r.messages) protectMessageEntry(m);
+      }
+      if (r.message && typeof r.message === 'object') {
+        protectMessageEntry(r.message);
+      }
+      // 流式文本 delta (尝试常见字段名)
+      if (typeof r.text === 'string') r.text = protectMathInMarkdown(r.text);
+      if (typeof r.delta === 'string') r.delta = protectMathInMarkdown(r.delta);
+      if (r.delta && typeof r.delta === 'object' && typeof r.delta.text === 'string') {
+        r.delta.text = protectMathInMarkdown(r.delta.text);
+      }
+    }
+    if (payload.request) {
+      const r = payload.request;
+      if (Array.isArray(r.messages)) {
+        for (const m of r.messages) protectMessageEntry(m);
+      }
+      if (r.message && typeof r.message === 'object') {
+        protectMessageEntry(r.message);
+      }
+      if (typeof r.text === 'string') r.text = protectMathInMarkdown(r.text);
+      if (typeof r.delta === 'string') r.delta = protectMathInMarkdown(r.delta);
+    }
+  }
+
+  // Msg log for diagnostics (Ctrl+Shift+M export)
   const __enhanceMsgLog = [];
   const __enhanceMsgLogMax = 30;
+
   try {
     window.addEventListener('message', function __enhanceCaptureListener(ev) {
       if (!ev || !ev.data) return;
       if (ev.data.type !== 'from-extension') return;
       try {
-        // 深拷贝 (避免引用导致后续变更污染 log)
-        const cloned = JSON.parse(JSON.stringify(ev.data.message));
-        __enhanceMsgLog.push({
-          t: new Date().toISOString(),
-          msg: cloned,
-        });
-        while (__enhanceMsgLog.length > __enhanceMsgLogMax) __enhanceMsgLog.shift();
+        const payload = ev.data.message;
+        // 先记录原始 (深拷贝) 用于诊断
+        try {
+          __enhanceMsgLog.push({
+            t: new Date().toISOString(),
+            msg: JSON.parse(JSON.stringify(payload)),
+          });
+          while (__enhanceMsgLog.length > __enhanceMsgLogMax) __enhanceMsgLog.shift();
+        } catch (_) {}
+        // 然后原地 mutate: 把 $...$ 和 $$...$$ 替换为占位符
+        protectPayload(payload);
       } catch (e) {
-        __enhanceMsgLog.push({ t: new Date().toISOString(), err: String(e) });
+        console.error('[Claude Enhance] protectPayload error:', e);
       }
-    }, true);  // capture = true
-    console.log('[Claude Enhance] Message capture hook installed (diagnostic mode)');
+    }, true);  // capture = true — 先于 CC 的 bubble listener
+    console.log('[Claude Enhance] Capture-phase math protection installed');
   } catch (e) {
-    console.error('[Claude Enhance] Failed to install message hook:', e);
+    console.error('[Claude Enhance] Failed to install capture hook:', e);
   }
   // Expose for debugging
   window.__enhanceMsgLog = __enhanceMsgLog;
+  window.__enhanceMathStore = MATH_STORE;
 
   // KaTeX 宏表 — 所有 katex.renderToString 调用共享
   // 两类: (1) siunitx 风格单位宏, (2) 常见 LaTeX 包命令的 KaTeX 别名
@@ -367,6 +488,82 @@
   }
 
   // 跨节点 $$...$$ 根源修复: markdown pipeline 把多行公式拆成多段 + 吞反斜杠时的系统恢复层
+  // ========================================================================
+  // Phase 2: swap `§§CEMATH<id>§§` placeholders in DOM with real KaTeX output
+  // ========================================================================
+  // 占位符由 capture-phase hook 在 markdown 被 CC 的 marked 处理之前注入.
+  // 到 DOM 里时, 占位符是 plain text, 没经历过任何 mangle. 我们从 MATH_STORE
+  // 里拿原始 TeX 源码, 用 KaTeX 渲染, 把占位符文本节点替换成 KaTeX HTML.
+  const PLACEHOLDER_RE = /§§CEMATH(\d+)§§/g;
+  let __phRenderedCount = 0;
+  function renderMathPlaceholders() {
+    if (typeof katex === 'undefined') return;
+    if (MATH_STORE.size === 0) return;
+
+    const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT, {
+      acceptNode: (n) => {
+        const t = n.textContent;
+        if (!t || t.indexOf('§§CEMATH') === -1) return NodeFilter.FILTER_REJECT;
+        const p = n.parentElement;
+        if (!p) return NodeFilter.FILTER_REJECT;
+        // 跳过 Monaco/toolUse/input 等; 但 allow 在 timelineMessage 外部的占位符
+        // (CC 可能把消息渲染到非 timelineMessage 结构里)
+        if (p.closest('.monaco-editor, .monaco-diff-editor, .view-lines, .view-line, script, style')) return NodeFilter.FILTER_REJECT;
+        if (p.closest('textarea, input')) return NodeFilter.FILTER_REJECT;
+        return NodeFilter.FILTER_ACCEPT;
+      }
+    });
+
+    const nodes = [];
+    let n;
+    while (n = walker.nextNode()) nodes.push(n);
+
+    for (const textNode of nodes) {
+      const text = textNode.textContent;
+      // 分段, 每个占位符替换成 KaTeX span
+      const parts = text.split(PLACEHOLDER_RE);
+      // parts: ['before', 'id1', 'middle', 'id2', 'after', ...]
+      if (parts.length < 3) continue;  // no match
+      const frag = document.createDocumentFragment();
+      for (let i = 0; i < parts.length; i++) {
+        if (i % 2 === 0) {
+          // Plain text chunk
+          if (parts[i]) frag.appendChild(document.createTextNode(parts[i]));
+        } else {
+          // Placeholder id
+          const id = Number(parts[i]);
+          const entry = MATH_STORE.get(id);
+          if (!entry) {
+            // 找不到源 — 保留原占位符文本
+            frag.appendChild(document.createTextNode(MATH_PLACEHOLDER_PREFIX + parts[i] + MATH_PLACEHOLDER_SUFFIX));
+            continue;
+          }
+          try {
+            const html = katex.renderToString(entry.src, {
+              displayMode: entry.mode === 'display',
+              throwOnError: false,
+              macros: SIUNITX_MACROS,
+            });
+            const wrapper = document.createElement(entry.mode === 'display' ? 'span' : 'span');
+            wrapper.innerHTML = html;
+            const rendered = wrapper.firstChild || wrapper;
+            frag.appendChild(rendered);
+            __phRenderedCount++;
+          } catch (e) {
+            // 渲染失败: 回退显示原始 TeX 源码 (带 $ $ 包裹)
+            const fallback = entry.mode === 'display'
+              ? '\n$$' + entry.src + '$$\n'
+              : '$' + entry.src + '$';
+            frag.appendChild(document.createTextNode(fallback));
+          }
+        }
+      }
+      try {
+        textNode.parentNode.replaceChild(frag, textNode);
+      } catch (_) {}
+    }
+  }
+
   function renderBlockDisplayMath() {
     if (typeof katex === 'undefined') return;
     const blocks = document.querySelectorAll(MATH_ALLOW_SELECTOR + ' :where(p, li)');
@@ -1193,6 +1390,7 @@
       debounceTimer = setTimeout(() => {
         highlightAllCode();
         renderLaTeX();
+        renderMathPlaceholders();  // Phase 2: swap §§CEMATH<id>§§ with KaTeX
         renderBlockDisplayMath();
         repairKatexErrors();
         scanAndAddCopyButtons();
@@ -1472,6 +1670,7 @@
     setupDOMInspector();
     highlightAllCode();
     renderLaTeX();
+    renderMathPlaceholders();  // Phase 2
     renderBlockDisplayMath();
     repairKatexErrors();
     scanAndAddCopyButtons();
