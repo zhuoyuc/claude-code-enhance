@@ -112,10 +112,20 @@ function restoreMissingBackslashes(tex) {
   return tex;
 }
 
+// NEW: CC markdown 有时把 \, \; \! \: 的反斜杠双写成 \\, \\; \\! \\:
+// KaTeX 会把 \\ 当作换行 → 视觉断行 + 字面标点
+// 修复: \\X → \X  (X ∈ {, ; ! :})
+// 注意: 矩阵 / align 里合法的 \\ 换行 (后接字母/空格/换行) 不动
+function stripEscapedBackslashPunct(tex) {
+  return tex.replace(/\\\\([,;!:])/g, '\\$1');
+}
+
 function restoreMissingSubscript(tex) {
-  // A. 定界符 | 后直接接 { → _{
+  // A. 定界符 | 后直接接 { 或字母/命令 → _
   //    \Big|{X} → \Big|_{X}
+  //    \bigg|P  → \bigg|_P   (在 envelope theorem, eval bar 等物理/热力学语境)
   tex = tex.replace(/(\\(?:[Bb]ig{1,2}|left|right)\s*\|)\{/g, '$1_{');
+  tex = tex.replace(/(\\(?:[Bb]ig{1,2}|left|right)\s*\|)(?=[A-Za-z\\])/g, '$1_');
 
   // B. 大运算符 \int/\sum/... 后直接接 \text/\mathrm → 加 _
   //    \int\text{top} → \int_\text{top}
@@ -134,38 +144,26 @@ function restoreMissingSubscript(tex) {
 }
 
 function restoreMathSpacing(tex) {
+  // 所有规则加 (?<!\\) 负向 lookbehind — 已经是 \, / \; 的不要再加反斜杠
   // --- 逗号 \, ---
-  // `,` 紧贴 \cmd → \,
-  tex = tex.replace(/,(?=\\[a-zA-Z])/g, '\\,');
-  // `}`/`)`/`]` 后的 `,` + 字母/命令 → \,
-  tex = tex.replace(/([})\]])(,)(?=\s*[A-Za-z\\])/g, '$1\\,');
-
+  tex = tex.replace(/(?<!\\),(?=\\[a-zA-Z])/g, '\\,');
+  tex = tex.replace(/([})\]])(?<!\\\\)(,)(?=\s*[A-Za-z\\])/g, '$1\\,');
   // --- 分号 \; ---
-  // ;\cmd → \;
-  tex = tex.replace(/;(?=\\[a-zA-Z])/g, '\\;');
-  // ; 直接在 = 前/后 → \;
-  tex = tex.replace(/;(?=\s*=)/g, '\\;');
-  tex = tex.replace(/(?<==\s*);/g, '\\;');
-  // `}`/`)`/`]` 后的 `;` + 字母/命令 → \;
-  tex = tex.replace(/([})\]])(;)(?=\s*[A-Za-z\\])/g, '$1\\;');
-
+  tex = tex.replace(/(?<!\\);(?=\\[a-zA-Z])/g, '\\;');
+  tex = tex.replace(/(?<!\\);(?=\s*=)/g, '\\;');
+  tex = tex.replace(/(?<==\s*)(?<!\\);/g, '\\;');
+  tex = tex.replace(/([})\]])(?<!\\\\)(;)(?=\s*[A-Za-z\\])/g, '$1\\;');
   // --- 冒号 \: ---
-  // :\cmd → \:
-  tex = tex.replace(/:(?=\\[a-zA-Z])/g, '\\:');
-
-  // --- 叹号 \! ---
-  // 注意: 阶乘 n!, (n-1)! 要保留. 只在无歧义的负薄空格场景恢复.
-  // (A) Frobenius 双内积 `!:!`:  }!:! 模式, `!` 前非字母/数字, 紧跟 `:`
-  tex = tex.replace(/(?<![a-zA-Z0-9])!(?=:)/g, '\\!');
-  // (B) :! 后接非字母/数字 (即 Frobenius 第二个 `!`)
-  tex = tex.replace(/(?<=:)!(?![a-zA-Z0-9])/g, '\\!');
-  // (C) !\cmd → \!\cmd, 但已经是 \! 的不再加 (负向 lookbehind 避免重复)
+  tex = tex.replace(/(?<!\\):(?=\\[a-zA-Z])/g, '\\:');
+  // --- 叹号 \! --- (避开阶乘 n!)
+  tex = tex.replace(/(?<![\\a-zA-Z0-9])!(?=:)/g, '\\!');
+  tex = tex.replace(/(?<=:)(?<!\\)!(?![a-zA-Z0-9])/g, '\\!');
   tex = tex.replace(/(?<!\\)!(?=\\[a-zA-Z])/g, '\\!');
-  // (不加 `}!/)!/]!` 规则 — 会误伤 (n-1)! 阶乘)
   return tex;
 }
 
 function normalizeMathSource(tex) {
+  tex = stripEscapedBackslashPunct(tex);  // FIRST: 恢复被双写的 \, \; \! \:
   tex = normalizeUnicode(tex);
   tex = restoreMissingBackslashes(tex);
   tex = restoreMissingSubscript(tex);
@@ -245,6 +243,34 @@ const cases = [
     name: '正常 \\sin\\cos 前面已有 \\ 不重复',
     in:  '\\sin x + \\cos y',
     out: '\\sin x + \\cos y',
+  },
+
+  // ---------- 用户实测: CC markdown 把 \, \; \! \: 的反斜杠双写 ----------
+  // 实际字符串里是 \\, 即 LaTeX 的换行 + 字面逗号, 视觉上断行
+  {
+    name: 'CC 双写 \\\\, → \\, (thin space)',
+    in:  '\\tfrac12 u_0^2\\\\,\\delta K_\\text{A} < 0',
+    out: '\\tfrac12 u_0^2\\,\\delta K_\\text{A} < 0',
+  },
+  {
+    name: 'CC 双写 \\\\! + 正常 \\! 混合 (Frobenius)',
+    in:  '\\tfrac12\\\\,\\bm\\varepsilon:\\!\\frac{\\partial\\mathbf C}{\\partial\\eta}\\\\!:\\!\\bm\\varepsilon',
+    out: '\\tfrac12\\,\\bm\\varepsilon:\\!\\frac{\\partial\\mathbf C}{\\partial\\eta}\\!:\\!\\bm\\varepsilon',
+  },
+  {
+    name: 'CC 双写 \\\\: (medium space)',
+    in:  '+\\tfrac12\\varepsilon\\\\:\\partial C/\\partial\\eta\\\\:\\varepsilon',
+    out: '+\\tfrac12\\varepsilon\\:\\partial C/\\partial\\eta\\:\\varepsilon',
+  },
+  {
+    name: '\\bigg|P 缺失下标 → \\bigg|_P',
+    in:  '\\frac{\\delta G}{\\delta\\eta}\\bigg|P = 0',
+    out: '\\frac{\\delta G}{\\delta\\eta}\\bigg|_P = 0',
+  },
+  {
+    name: '矩阵 \\\\ 换行 (后接换行/空格/字母) 不动',
+    in:  '\\begin{matrix} a & b \\\\ c & d \\end{matrix}',
+    out: '\\begin{matrix} a & b \\\\ c & d \\end{matrix}',
   },
 ];
 

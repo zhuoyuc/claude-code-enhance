@@ -162,11 +162,20 @@
     return tex;
   }
 
+  // (2.5) CC markdown 有时把 \, \; \! \: 的反斜杠双写成 \\,  \\;  \\!  \\:
+  //       KaTeX 把 \\ 当作换行符, 导致视觉断行 + 字面标点出现
+  //       修复: \\X → \X  (X ∈ {, ; ! :})  — 矩阵/align 里合法 \\ 换行不动
+  function stripEscapedBackslashPunct(tex) {
+    return tex.replace(/\\\\([,;!:])/g, '\\$1');
+  }
+
   // (3) 恢复缺失的 _ 下标
   function restoreMissingSubscript(tex) {
-    // A. 定界符 | 后直接接 { → _{
+    // A. 定界符 | 后直接接 { 或字母/命令 → _
     //    \Big|{X} → \Big|_{X}
+    //    \bigg|P  → \bigg|_P   (envelope theorem 等场景)
     tex = tex.replace(/(\\(?:[Bb]ig{1,2}|left|right)\s*\|)\{/g, '$1_{');
+    tex = tex.replace(/(\\(?:[Bb]ig{1,2}|left|right)\s*\|)(?=[A-Za-z\\])/g, '$1_');
     // B. 大运算符后直接接 \text/\mathrm  → 加 _
     //    \int\text{top} → \int_\text{top}
     tex = tex.replace(
@@ -183,26 +192,28 @@
   }
 
   // (4) 恢复被 CommonMark 吞掉的间距命令: \, \; \: \!
+  //     全部规则加 (?<!\\) 防止在已经是 \, / \; 的字符上再加一层反斜杠
   function restoreMathSpacing(tex) {
     // , → \,
-    tex = tex.replace(/,(?=\\[a-zA-Z])/g, '\\,');
-    tex = tex.replace(/([})\]])(,)(?=\s*[A-Za-z\\])/g, '$1\\,');
+    tex = tex.replace(/(?<!\\),(?=\\[a-zA-Z])/g, '\\,');
+    tex = tex.replace(/([})\]])(?<!\\\\)(,)(?=\s*[A-Za-z\\])/g, '$1\\,');
     // ; → \;
-    tex = tex.replace(/;(?=\\[a-zA-Z])/g, '\\;');
-    tex = tex.replace(/;(?=\s*=)/g, '\\;');
-    tex = tex.replace(/(?<==\s*);/g, '\\;');
-    tex = tex.replace(/([})\]])(;)(?=\s*[A-Za-z\\])/g, '$1\\;');
+    tex = tex.replace(/(?<!\\);(?=\\[a-zA-Z])/g, '\\;');
+    tex = tex.replace(/(?<!\\);(?=\s*=)/g, '\\;');
+    tex = tex.replace(/(?<==\s*)(?<!\\);/g, '\\;');
+    tex = tex.replace(/([})\]])(?<!\\\\)(;)(?=\s*[A-Za-z\\])/g, '$1\\;');
     // : → \:
-    tex = tex.replace(/:(?=\\[a-zA-Z])/g, '\\:');
+    tex = tex.replace(/(?<!\\):(?=\\[a-zA-Z])/g, '\\:');
     // ! → \!  (避开阶乘 n!)
-    tex = tex.replace(/(?<![a-zA-Z0-9])!(?=:)/g, '\\!');
-    tex = tex.replace(/(?<=:)!(?![a-zA-Z0-9])/g, '\\!');
+    tex = tex.replace(/(?<![\\a-zA-Z0-9])!(?=:)/g, '\\!');
+    tex = tex.replace(/(?<=:)(?<!\\)!(?![a-zA-Z0-9])/g, '\\!');
     tex = tex.replace(/(?<!\\)!(?=\\[a-zA-Z])/g, '\\!');
     return tex;
   }
 
   // **统一入口** — 所有 KaTeX 渲染路径调用本函数归一化数学源
   function normalizeMathSource(tex) {
+    tex = stripEscapedBackslashPunct(tex);  // FIRST: 恢复被双写的 \,  \;  \!  \:
     tex = normalizeUnicode(tex);
     tex = restoreMissingBackslashes(tex);
     tex = restoreMissingSubscript(tex);
@@ -566,7 +577,7 @@
     document.querySelectorAll(MATH_ALLOW_SELECTOR + ' .katex-error').forEach((errSpan) => {
       if (errSpan.closest(MATH_DENY_SELECTOR_NO_KATEX)) return;
       const rawTex = errSpan.textContent;
-      if (!rawTex || rawTex.length > 800) return;
+      if (!rawTex || rawTex.length > 5000) return;
       const katexRoot = errSpan.closest('.katex');
       if (!katexRoot) return;
       if (katexRoot.closest('[data-claude-repaired]')) return;
@@ -576,19 +587,36 @@
     });
 
     // Pass 2: 软错误 — 渲染"成功"但源码里有裸命令或被吞掉的间距符
+    let pass2Seen = 0, pass2Changed = 0, pass2Replaced = 0;
     document.querySelectorAll(MATH_ALLOW_SELECTOR + ' .katex').forEach((katexNode) => {
       if (katexNode.closest(MATH_DENY_SELECTOR_NO_KATEX)) return;
       if (katexNode.closest('[data-claude-repaired]')) return;
       const annotation = katexNode.querySelector('annotation');
       if (!annotation) return;
       const source = annotation.textContent;
-      if (!source || source.length > 800) return;
+      if (!source) return;
+      // 限制长度: 5000 (之前 800 太紧, 复杂 display 公式很容易超)
+      if (source.length > 5000) {
+        console.warn('[Claude Enhance] Pass2: skip (source too long)', source.length);
+        return;
+      }
+      pass2Seen++;
       const fixed = normalizeMathSource(source);
-      if (fixed === source) return;  // 归一化后无变化, 跳过
+      if (fixed === source) return;
+      pass2Changed++;
+      // 诊断日志 (窗口打开后可在 DevTools 看)
+      if (pass2Changed <= 3) {
+        console.log('[Claude Enhance] Pass2 #' + pass2Changed);
+        console.log('  src :', source.slice(0, 200));
+        console.log('  fix :', fixed.slice(0, 200));
+      }
       const isDisplay = !!katexNode.closest('.katex-display');
       const target = isDisplay ? (katexNode.closest('.katex-display') || katexNode) : katexNode;
-      rerender(target, fixed, isDisplay);
+      if (rerender(target, fixed, isDisplay)) pass2Replaced++;
     });
+    if (pass2Seen > 0) {
+      console.log(`[Claude Enhance] Pass2 summary: ${pass2Seen} scanned, ${pass2Changed} normalized, ${pass2Replaced} replaced`);
+    }
   }
 
   // 渲染 LaTeX
@@ -1108,6 +1136,48 @@
         e.preventDefault();
         exportDOMStructure();
       }
+      // Ctrl+Shift+L 导出页面里所有 KaTeX 公式的 annotation 源 + 归一化结果
+      if (e.ctrlKey && e.shiftKey && e.key === 'L') {
+        e.preventDefault();
+        exportKatexSources();
+      }
+    });
+  }
+
+  // 把所有 .katex 的 <annotation> 源码 + 归一化后的预期源码打包到剪贴板
+  function exportKatexSources() {
+    const nodes = document.querySelectorAll(MATH_ALLOW_SELECTOR + ' .katex');
+    const items = [];
+    nodes.forEach((node, i) => {
+      if (node.closest(MATH_DENY_SELECTOR_NO_KATEX)) return;
+      const annotation = node.querySelector('annotation');
+      if (!annotation) return;
+      const src = annotation.textContent || '';
+      const isDisplay = !!node.closest('.katex-display');
+      let fixed = '';
+      try { fixed = normalizeMathSource(src); } catch (e) { fixed = '<ERROR: ' + e.message + '>'; }
+      items.push({
+        i: items.length,
+        mode: isDisplay ? 'display' : 'inline',
+        srcLen: src.length,
+        src: src,
+        fixed: fixed,
+        changed: fixed !== src,
+      });
+    });
+    const out = JSON.stringify({
+      timestamp: new Date().toISOString(),
+      totalKatex: nodes.length,
+      inScope: items.length,
+      items: items,
+    }, null, 2);
+    navigator.clipboard.writeText(out).then(() => {
+      showNotification(`KaTeX 源码 (${items.length} 个公式) 已复制. 粘贴给 Claude.`);
+      console.log('[Claude Enhance] Exported', items.length, 'KaTeX sources');
+    }).catch(err => {
+      console.error('[Claude Enhance] Copy failed:', err);
+      console.log(out);
+      showNotification('复制失败, 请查看控制台');
     });
   }
 
