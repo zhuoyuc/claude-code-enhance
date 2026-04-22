@@ -6,8 +6,21 @@
 (function() {
   'use strict';
 
-  // siunitx 宏表 — 所有 katex.renderToString 调用共享
+  // KaTeX 宏表 — 所有 katex.renderToString 调用共享
+  // 两类: (1) siunitx 风格单位宏, (2) 常见 LaTeX 包命令的 KaTeX 别名
+  //       (KaTeX 只支持核心 LaTeX 语法, 其他包的命令需要手工桥接)
   const SIUNITX_MACROS = {
+    // ----- 常见 LaTeX 包 → KaTeX 原生映射 (KaTeX 不支持这些包, 必须桥接) -----
+    "\\bm": "\\boldsymbol{#1}",           // bm 包  →  \boldsymbol
+    "\\vb": "\\mathbf{#1}",               // physics: vector bold
+    "\\dv": "\\frac{\\mathrm{d}#1}{\\mathrm{d}#2}",  // physics: derivative
+    "\\pdv": "\\frac{\\partial #1}{\\partial #2}",   // physics: partial derivative
+    "\\abs": "\\left|#1\\right|",         // physics
+    "\\norm": "\\left\\|#1\\right\\|",    // physics
+    "\\bra": "\\left\\langle #1\\right|", // braket
+    "\\ket": "\\left|#1\\right\\rangle",  // braket
+    "\\braket": "\\left\\langle #1\\right\\rangle",
+    // ----- siunitx -----
     // \SI{value}{unit}  \si{unit}  \num{value}
     "\\SI": "#1\\,#2",
     "\\si": "#1",
@@ -526,18 +539,27 @@
   function repairKatexErrors() {
     if (typeof katex === 'undefined') return;
 
+    // 先用 throwOnError:true 严格尝试, 失败则用 throwOnError:false 做 best-effort 渲染
+    // 目的: 归一化后的源通常比原始 mangled 源更正确, 尽量用上归一化结果
     function rerender(targetNode, source, isDisplay) {
+      let rendered;
       try {
-        const rendered = katex.renderToString(source, {
+        rendered = katex.renderToString(source, {
           displayMode: isDisplay, throwOnError: true, macros: SIUNITX_MACROS,
         });
-        const wrapper = document.createElement(isDisplay ? 'div' : 'span');
-        wrapper.innerHTML = rendered;
-        const newNode = wrapper.firstChild || wrapper;
-        if (newNode.nodeType === 1) newNode.setAttribute('data-claude-repaired', '1');
-        targetNode.replaceWith(newNode);
-        return true;
-      } catch (e) { return false; }
+      } catch (e) {
+        try {
+          rendered = katex.renderToString(source, {
+            displayMode: isDisplay, throwOnError: false, macros: SIUNITX_MACROS,
+          });
+        } catch (e2) { return false; }
+      }
+      const wrapper = document.createElement(isDisplay ? 'div' : 'span');
+      wrapper.innerHTML = rendered;
+      const newNode = wrapper.firstChild || wrapper;
+      if (newNode.nodeType === 1) newNode.setAttribute('data-claude-repaired', '1');
+      targetNode.replaceWith(newNode);
+      return true;
     }
 
     // Pass 1: 硬错误 (.katex-error) — CC 原生 KaTeX 完全挂了
