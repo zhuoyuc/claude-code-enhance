@@ -6,6 +6,313 @@
 (function() {
   'use strict';
 
+  // siunitx 宏表 — 所有 katex.renderToString 调用共享
+  const SIUNITX_MACROS = {
+    // \SI{value}{unit}  \si{unit}  \num{value}
+    "\\SI": "#1\\,#2",
+    "\\si": "#1",
+    "\\num": "#1",
+    // SI 前缀
+    "\\yotta": "\\text{Y}", "\\zetta": "\\text{Z}",
+    "\\exa": "\\text{E}", "\\peta": "\\text{P}",
+    "\\tera": "\\text{T}", "\\giga": "\\text{G}",
+    "\\mega": "\\text{M}", "\\kilo": "\\text{k}",
+    "\\hecto": "\\text{h}", "\\deca": "\\text{da}",
+    "\\deci": "\\text{d}", "\\centi": "\\text{c}",
+    "\\milli": "\\text{m}", "\\micro": "\\text{μ}",
+    "\\nano": "\\text{n}", "\\pico": "\\text{p}",
+    "\\femto": "\\text{f}", "\\atto": "\\text{a}",
+    // SI 基本单位
+    "\\meter": "\\text{m}", "\\metre": "\\text{m}",
+    "\\gram": "\\text{g}", "\\kilogram": "\\text{kg}",
+    "\\second": "\\text{s}", "\\ampere": "\\text{A}",
+    "\\kelvin": "\\text{K}", "\\mole": "\\text{mol}",
+    "\\candela": "\\text{cd}",
+    // 导出单位
+    "\\pascal": "\\text{Pa}", "\\newton": "\\text{N}",
+    "\\joule": "\\text{J}", "\\watt": "\\text{W}",
+    "\\volt": "\\text{V}", "\\ohm": "\\text{Ω}",
+    "\\siemens": "\\text{S}", "\\farad": "\\text{F}",
+    "\\henry": "\\text{H}", "\\tesla": "\\text{T}",
+    "\\weber": "\\text{Wb}", "\\hertz": "\\text{Hz}",
+    "\\lumen": "\\text{lm}", "\\lux": "\\text{lx}",
+    "\\becquerel": "\\text{Bq}", "\\gray": "\\text{Gy}",
+    "\\sievert": "\\text{Sv}", "\\katal": "\\text{kat}",
+    // 非 SI 通用单位
+    "\\liter": "\\text{L}", "\\litre": "\\text{L}",
+    "\\minute": "\\text{min}", "\\hour": "\\text{h}",
+    "\\day": "\\text{d}", "\\electronvolt": "\\text{eV}",
+    "\\bar": "\\text{bar}", "\\degree": "^{\\circ}",
+    // 修饰符
+    "\\per": "/", "\\square": "^{2}", "\\cubic": "^{3}",
+    "\\squared": "^{2}", "\\cubed": "^{3}",
+  };
+
+  // ========================================================================
+  // 数学归一化管道 — 所有 KaTeX 入口共用 normalizeMathSource()
+  //   验证见 webview/test-normalize.js (TDD: 12/12 golden cases passing)
+  // ========================================================================
+
+  // 已知的 LaTeX 数学命令白名单 (按类别组织, 无序)
+  const MATH_CMD_LIST = [
+    // 关系/大运算
+    'frac','sqrt','sum','prod','int','oint','iint','iiint','lim','inf','sup','max','min',
+    'neq','leq','geq','ll','gg','approx','equiv','sim','simeq','cong','propto',
+    'subset','supset','subseteq','supseteq','in','notin','cup','cap','setminus',
+    // 二元运算
+    'cdot','cdots','ldots','dots','vdots','ddots',
+    'times','div','pm','mp','oplus','ominus','otimes','odot','wedge','vee',
+    // 箭头
+    'to','rightarrow','leftarrow','Rightarrow','Leftarrow','leftrightarrow','Leftrightarrow','mapsto',
+    // 微积分/量词
+    'partial','nabla','infty','forall','exists','emptyset',
+    // 字体
+    'text','mathrm','mathbf','mathit','mathsf','mathtt','mathcal','mathbb','mathfrak','boldsymbol','bm','operatorname',
+    // 分数/堆叠
+    'tfrac','dfrac','cfrac','binom','tbinom','dbinom','overset','underset','stackrel',
+    // 定界符
+    'Big','big','Bigg','bigg','left','right','middle','langle','rangle','lvert','rvert','lVert','rVert',
+    // 函数
+    'sin','cos','tan','cot','sec','csc','arcsin','arccos','arctan','sinh','cosh','tanh',
+    'log','ln','exp','det','dim','deg','gcd','arg','Re','Im','ker','hom',
+    // 小写希腊
+    'alpha','beta','gamma','delta','epsilon','varepsilon','zeta','eta','theta','vartheta',
+    'iota','kappa','lambda','mu','nu','xi','pi','varpi','rho','varrho','sigma','varsigma',
+    'tau','upsilon','phi','varphi','chi','psi','omega',
+    // 大写希腊
+    'Gamma','Delta','Theta','Lambda','Xi','Pi','Sigma','Upsilon','Phi','Psi','Omega',
+    // 命名空格
+    'quad','qquad',
+    // 重音/装饰
+    'hat','bar','tilde','vec','dot','ddot','check','breve','acute','grave',
+    'widehat','widetilde','overline','underline','overbrace','underbrace',
+    'overrightarrow','overleftarrow',
+    // 其他
+    'not','prime','dag','ddag','star','ast','circ','bullet',
+  ];
+  // Subscript-label commands: 后接 eval-bar `|` 当作下标标签的, LEAD_PIPE_RE 不处理, 留给 restoreMissingSubscript
+  const LABEL_CMDS = ['text','mathrm','mathbf','mathit','mathsf','mathtt'];
+  const NON_LABEL_CMDS = MATH_CMD_LIST.filter(c => !LABEL_CMDS.includes(c));
+  const BARE_CMD_RE = new RegExp(
+    '(?<![\\\\a-zA-Z])(' + MATH_CMD_LIST.join('|') + ')(?![a-zA-Z])',
+    'g'
+  );
+  const LEAD_PIPE_RE = new RegExp(
+    '(?<![A-Za-z0-9])\\|(' + NON_LABEL_CMDS.join('|') + ')(?![a-zA-Z])',
+    'g'
+  );
+
+  // (1) Unicode → LaTeX: \Delta, \nu, \neq 等
+  //     多字符替换后如果紧跟字母, 插入空格 (\DeltaE → \Delta E)
+  function normalizeUnicode(tex) {
+    const M = {
+      'α':'\\alpha','β':'\\beta','γ':'\\gamma','δ':'\\delta',
+      'ε':'\\epsilon','ζ':'\\zeta','η':'\\eta','θ':'\\theta',
+      'ι':'\\iota','κ':'\\kappa','λ':'\\lambda','μ':'\\mu',
+      'ν':'\\nu','ξ':'\\xi','π':'\\pi','ρ':'\\rho',
+      'σ':'\\sigma','τ':'\\tau','υ':'\\upsilon','φ':'\\varphi',
+      'χ':'\\chi','ψ':'\\psi','ω':'\\omega',
+      'Γ':'\\Gamma','Δ':'\\Delta','Θ':'\\Theta','Λ':'\\Lambda',
+      'Ξ':'\\Xi','Π':'\\Pi','Σ':'\\Sigma','Υ':'\\Upsilon',
+      'Φ':'\\Phi','Ψ':'\\Psi','Ω':'\\Omega',
+      '−':'-','–':'-','×':'\\times','÷':'\\div',
+      '≤':'\\leq','≥':'\\geq','≠':'\\neq','≈':'\\approx',
+      '∞':'\\infty','∂':'\\partial','∇':'\\nabla',
+      '∑':'\\sum','∏':'\\prod','∫':'\\int',
+      '√':'\\sqrt','±':'\\pm','∓':'\\mp','·':'\\cdot',
+      '→':'\\rightarrow','←':'\\leftarrow','↔':'\\leftrightarrow',
+      '⇒':'\\Rightarrow','⇐':'\\Leftarrow','⇔':'\\Leftrightarrow',
+      '∈':'\\in','∉':'\\notin','⊂':'\\subset','⊃':'\\supset',
+      '∪':'\\cup','∩':'\\cap','∅':'\\emptyset',
+      '′':"'",'″':"''",
+    };
+    let out = '';
+    for (let i = 0; i < tex.length; i++) {
+      const ch = tex[i];
+      const rep = M[ch];
+      if (rep === undefined) { out += ch; continue; }
+      if (rep.startsWith('\\') && i + 1 < tex.length && /[a-zA-Z]/.test(tex[i + 1])) {
+        out += rep + ' ';
+      } else {
+        out += rep;
+      }
+    }
+    return out;
+  }
+
+  // (2) 恢复缺失反斜杠:
+  //     - 错位为 | 的 \cmd (|cmd 前非字母数字, 且 cmd 不是 label) → \cmd
+  //     - 裸 cmd (前非 \ 或字母) → \cmd
+  function restoreMissingBackslashes(tex) {
+    tex = tex.replace(LEAD_PIPE_RE, '\\$1');
+    tex = tex.replace(BARE_CMD_RE, '\\$1');
+    return tex;
+  }
+
+  // (3) 恢复缺失的 _ 下标
+  function restoreMissingSubscript(tex) {
+    // A. 定界符 | 后直接接 { → _{
+    //    \Big|{X} → \Big|_{X}
+    tex = tex.replace(/(\\(?:[Bb]ig{1,2}|left|right)\s*\|)\{/g, '$1_{');
+    // B. 大运算符后直接接 \text/\mathrm  → 加 _
+    //    \int\text{top} → \int_\text{top}
+    tex = tex.replace(
+      /(\\(?:int|oint|iint|iiint|sum|prod|coprod|bigcup|bigcap|bigoplus|bigotimes))\s*(\\(?:text|mathrm|mathbf|mathit|mathsf|mathtt))\b/g,
+      '$1_$2'
+    );
+    // C. 变量/闭括号后 |\text/\mathrm → |_\text  (eval-bar 下标)
+    //    \mathbf{u}|\text{prescribed} → \mathbf{u}|_\text{prescribed}
+    tex = tex.replace(
+      /([A-Za-z}\)\]])\|\s*(\\(?:text|mathrm|mathbf|mathit))\b/g,
+      '$1|_$2'
+    );
+    return tex;
+  }
+
+  // (4) 恢复被 CommonMark 吞掉的间距命令: \, \; \: \!
+  function restoreMathSpacing(tex) {
+    // , → \,
+    tex = tex.replace(/,(?=\\[a-zA-Z])/g, '\\,');
+    tex = tex.replace(/([})\]])(,)(?=\s*[A-Za-z\\])/g, '$1\\,');
+    // ; → \;
+    tex = tex.replace(/;(?=\\[a-zA-Z])/g, '\\;');
+    tex = tex.replace(/;(?=\s*=)/g, '\\;');
+    tex = tex.replace(/(?<==\s*);/g, '\\;');
+    tex = tex.replace(/([})\]])(;)(?=\s*[A-Za-z\\])/g, '$1\\;');
+    // : → \:
+    tex = tex.replace(/:(?=\\[a-zA-Z])/g, '\\:');
+    // ! → \!  (避开阶乘 n!)
+    tex = tex.replace(/(?<![a-zA-Z0-9])!(?=:)/g, '\\!');
+    tex = tex.replace(/(?<=:)!(?![a-zA-Z0-9])/g, '\\!');
+    tex = tex.replace(/(?<!\\)!(?=\\[a-zA-Z])/g, '\\!');
+    return tex;
+  }
+
+  // **统一入口** — 所有 KaTeX 渲染路径调用本函数归一化数学源
+  function normalizeMathSource(tex) {
+    tex = normalizeUnicode(tex);
+    tex = restoreMissingBackslashes(tex);
+    tex = restoreMissingSubscript(tex);
+    tex = restoreMathSpacing(tex);
+    return tex;
+  }
+
+  // ========================================================================
+  // 作用域控制: 只处理 AI 聊天消息正文, 绝不碰 Monaco/toolUse/输入框
+  // ========================================================================
+  const MATH_ALLOW_SELECTOR = '[class*="timelineMessage"]';
+  const MATH_DENY_SELECTOR = [
+    '.monaco-editor',
+    '.monaco-diff-editor',
+    '.diffEditorContainer_s6OFow',
+    '.diffEditorWrapper_s6OFow',
+    '.view-lines',
+    '.view-line',
+    'pre',
+    'code',
+    'textarea',
+    'input',
+    'button',
+    '[class*="toolUse"]',
+    '[class*="toolResult"]',
+    '[class*="toolBody"]',
+    '[class*="toolSummary"]',
+    '[class*="codeBlock"]',
+    '[class*="inputContainer"]',
+    '[class*="messageInput"]',
+    '[class*="mentionMirror"]',
+    '[class*="sessionsList"]',
+    '[class*="sessionItem"]',
+    '.katex',
+  ].join(', ');
+  // 同上, 但不含 .katex (Pass 2 要进入 .katex 节点自身)
+  const MATH_DENY_SELECTOR_NO_KATEX = MATH_DENY_SELECTOR.replace(/, \.katex$/, '');
+
+  // ========================================================================
+  // DOM 辅助
+  // ========================================================================
+
+  // 在 container 内查找 openDelim ... closeDelim 对应的 DOM Range
+  // 可跨多个文本节点 (例如被 <br> 或 <p> 分隔的多行 $$...$$)
+  function findDelimitedRange(container, openDelim, closeDelim) {
+    const walker = document.createTreeWalker(container, NodeFilter.SHOW_TEXT, {
+      acceptNode: (n) => {
+        const p = n.parentElement;
+        if (!p) return NodeFilter.FILTER_REJECT;
+        if (p.closest(MATH_DENY_SELECTOR)) return NodeFilter.FILTER_REJECT;
+        return NodeFilter.FILTER_ACCEPT;
+      }
+    });
+    let openNode = null, openOffset = -1;
+    let n;
+    while (n = walker.nextNode()) {
+      const t = n.textContent;
+      if (openNode === null) {
+        const idx = t.indexOf(openDelim);
+        if (idx === -1) continue;
+        openNode = n; openOffset = idx;
+        const closeIdx = t.indexOf(closeDelim, openOffset + openDelim.length);
+        if (closeIdx !== -1) {
+          const range = document.createRange();
+          range.setStart(openNode, openOffset);
+          range.setEnd(n, closeIdx + closeDelim.length);
+          return range;
+        }
+      } else {
+        const idx = t.indexOf(closeDelim);
+        if (idx !== -1) {
+          const range = document.createRange();
+          range.setStart(openNode, openOffset);
+          range.setEnd(n, idx + closeDelim.length);
+          return range;
+        }
+      }
+    }
+    return null;
+  }
+
+  // 跨节点 $$...$$ 根源修复: markdown pipeline 把多行公式拆成多段 + 吞反斜杠时的系统恢复层
+  function renderBlockDisplayMath() {
+    if (typeof katex === 'undefined') return;
+    const blocks = document.querySelectorAll(MATH_ALLOW_SELECTOR + ' :where(p, li)');
+    let repairedCount = 0;
+    blocks.forEach((block) => {
+      if (block.dataset.claudeBlockMath) return;
+      if (block.closest(MATH_DENY_SELECTOR_NO_KATEX)) return;
+
+      const text = block.textContent;
+      if (!text || text.indexOf('$$') === -1) return;
+      if (!/\$\$[\s\S]+?\$\$/.test(text)) return;
+
+      block.dataset.claudeBlockMath = '1';
+      for (let iter = 0; iter < 10; iter++) {
+        const range = findDelimitedRange(block, '$$', '$$');
+        if (!range) break;
+        try {
+          const raw = range.toString();
+          let formula = raw.replace(/^\$\$/, '').replace(/\$\$$/, '').trim();
+          if (!formula) break;
+          formula = normalizeMathSource(formula);
+          const html = katex.renderToString(formula, {
+            displayMode: true, throwOnError: false, macros: SIUNITX_MACROS,
+          });
+          const wrapper = document.createElement('span');
+          wrapper.innerHTML = html;
+          const newNode = wrapper.firstChild || wrapper;
+          range.deleteContents();
+          range.insertNode(newNode);
+          repairedCount++;
+        } catch (e) {
+          console.warn('[Claude Enhance] Block math render failed:', e);
+          break;
+        }
+      }
+    });
+    if (repairedCount > 0) {
+      console.log(`[Claude Enhance] Block display math: recovered ${repairedCount} formula(s)`);
+    }
+  }
+
   console.log('[Claude Enhance] Loading...');
 
   // 注入样式
@@ -196,6 +503,54 @@
     });
   }
 
+  // 修复 CC 原生 KaTeX 渲染后的公式 (Pass 1 硬错误 / Pass 2 annotation 源检查)
+  // 所有归一化都走模块级 normalizeMathSource, 和其他入口保持一致
+  function repairKatexErrors() {
+    if (typeof katex === 'undefined') return;
+
+    function rerender(targetNode, source, isDisplay) {
+      try {
+        const rendered = katex.renderToString(source, {
+          displayMode: isDisplay, throwOnError: true, macros: SIUNITX_MACROS,
+        });
+        const wrapper = document.createElement(isDisplay ? 'div' : 'span');
+        wrapper.innerHTML = rendered;
+        const newNode = wrapper.firstChild || wrapper;
+        if (newNode.nodeType === 1) newNode.setAttribute('data-claude-repaired', '1');
+        targetNode.replaceWith(newNode);
+        return true;
+      } catch (e) { return false; }
+    }
+
+    // Pass 1: 硬错误 (.katex-error) — CC 原生 KaTeX 完全挂了
+    document.querySelectorAll(MATH_ALLOW_SELECTOR + ' .katex-error').forEach((errSpan) => {
+      if (errSpan.closest(MATH_DENY_SELECTOR_NO_KATEX)) return;
+      const rawTex = errSpan.textContent;
+      if (!rawTex || rawTex.length > 800) return;
+      const katexRoot = errSpan.closest('.katex');
+      if (!katexRoot) return;
+      if (katexRoot.closest('[data-claude-repaired]')) return;
+      const isDisplay = !!katexRoot.closest('.katex-display');
+      const target = isDisplay ? (katexRoot.closest('.katex-display') || katexRoot) : katexRoot;
+      rerender(target, normalizeMathSource(rawTex), isDisplay);
+    });
+
+    // Pass 2: 软错误 — 渲染"成功"但源码里有裸命令或被吞掉的间距符
+    document.querySelectorAll(MATH_ALLOW_SELECTOR + ' .katex').forEach((katexNode) => {
+      if (katexNode.closest(MATH_DENY_SELECTOR_NO_KATEX)) return;
+      if (katexNode.closest('[data-claude-repaired]')) return;
+      const annotation = katexNode.querySelector('annotation');
+      if (!annotation) return;
+      const source = annotation.textContent;
+      if (!source || source.length > 800) return;
+      const fixed = normalizeMathSource(source);
+      if (fixed === source) return;  // 归一化后无变化, 跳过
+      const isDisplay = !!katexNode.closest('.katex-display');
+      const target = isDisplay ? (katexNode.closest('.katex-display') || katexNode) : katexNode;
+      rerender(target, fixed, isDisplay);
+    });
+  }
+
   // 渲染 LaTeX
   function renderLaTeX() {
     if (typeof katex === 'undefined') return;
@@ -210,15 +565,10 @@
           acceptNode: (node) => {
             const parent = node.parentNode;
             if (!parent || parent.nodeType !== 1) return NodeFilter.FILTER_REJECT;
-            // 跳过已渲染的 KaTeX, 特殊标签, 和 session 列表
-            if (parent.classList?.contains('katex') ||
-                parent.closest('.katex') ||
-                parent.closest('[class*="sessionsList"]') ||
-                parent.closest('[class*="sessionItem"]') ||
-                parent.closest('[class*="sessionName"]') ||
-                ['SCRIPT', 'STYLE', 'CODE', 'PRE', 'BUTTON', 'INPUT', 'TEXTAREA'].includes(parent.tagName)) {
-              return NodeFilter.FILTER_REJECT;
-            }
+            // 只在 AI 消息正文 (timelineMessage) 内部处理
+            if (!parent.closest(MATH_ALLOW_SELECTOR)) return NodeFilter.FILTER_REJECT;
+            // 排除 Monaco 编辑器 / tool use / 代码块 / 输入框 / 已渲染 KaTeX
+            if (parent.closest(MATH_DENY_SELECTOR)) return NodeFilter.FILTER_REJECT;
             const text = node.textContent;
             if (!text) return NodeFilter.FILTER_REJECT;
             // 原始模式: $$, $, \(, \[
@@ -276,11 +626,14 @@
               // 修复 \operatorname 后面直接跟内容的情况
               fixed = fixed.replace(/\\operatorname\{(\w+)\}(\()/g, '\\operatorname{$1}$2');
 
-              return katex.renderToString(fixed, { displayMode: true, throwOnError: false, macros: {
-                "\\begin{cases}": "\\begin{cases}",
-                "\\end{cases}": "\\end{cases}",
-                "\\text": "\\text"
-              }});
+              // Markdown 吞掉 \! 后的孤立 ! 清理 (同 inline 分支)
+              let prev2;
+              do {
+                prev2 = fixed;
+                fixed = fixed.replace(/(\\[a-zA-Z]+)!\s*(?=\\[a-zA-Z])/g, '$1');
+              } while (fixed !== prev2);
+
+              return katex.renderToString(normalizeMathSource(fixed), { displayMode: true, throwOnError: false, macros: SIUNITX_MACROS });
             } catch { return match; }
           });
 
@@ -288,7 +641,7 @@
           resultHTML = resultHTML.replace(/\\\(([\s\S]+?)\\\)/g, (match, formula) => {
             hasFormula = true;
             try {
-              return katex.renderToString(formula.trim(), { displayMode: false, throwOnError: false });
+              return katex.renderToString(normalizeMathSource(formula.trim()), { displayMode: false, throwOnError: false, macros: SIUNITX_MACROS });
             } catch { return match; }
           });
 
@@ -296,12 +649,12 @@
           resultHTML = resultHTML.replace(/\\\[([\s\S]+?)\\\]/g, (match, formula) => {
             hasFormula = true;
             try {
-              return katex.renderToString(formula, { displayMode: true, throwOnError: false });
+              return katex.renderToString(normalizeMathSource(formula), { displayMode: true, throwOnError: false, macros: SIUNITX_MACROS });
             } catch { return match; }
           });
 
-          // $...$ 行内公式 (支持多行, 自动清理换行)
-          resultHTML = resultHTML.replace(/\$([\s\S]+?)\$/g, (match, formula) => {
+          // $...$ 行内公式 (单行, 不跨 $, 长度上限 400 — 防止贪婪吞噬已渲染HTML)
+          resultHTML = resultHTML.replace(/\$([^$\n]{1,400})\$/g, (match, formula) => {
             const content = formula.trim();
             // 清理换行和多余空格, 保持一行
             const cleaned = content.replace(/\s+/g, ' ').trim();
@@ -314,7 +667,14 @@
             hasFormula = true;
             try {
               let fixed = cleaned.replace(/\\ (?=[a-zA-Z0-9_{}])/g, '\\\\ ');
-              return katex.renderToString(fixed, { displayMode: false, throwOnError: false });
+              // Markdown 吞掉 `\!` 负薄空格后留下孤立 `!` (形如 "\cdot!\sigma")
+              // 迭代移除两个 TeX 控制序列之间的孤立 `!`, 避免 KaTeX 渲染成字面 `!`
+              let prev;
+              do {
+                prev = fixed;
+                fixed = fixed.replace(/(\\[a-zA-Z]+)!\s*(?=\\[a-zA-Z])/g, '$1');
+              } while (fixed !== prev);
+              return katex.renderToString(normalizeMathSource(fixed), { displayMode: false, throwOnError: false, macros: SIUNITX_MACROS });
             } catch { return match; }
           });
 
@@ -322,10 +682,12 @@
           // (?<!\w) 防止误匹配 \left[...] 中 t 后面的 [
           resultHTML = resultHTML.replace(/(?<!\w)\[([^\[\]]{3,600})\](?!\w)/g, (match, formula) => {
             const trimmed = formula.trim();
+            // 跳过已含 HTML 标签的内容 (前面步骤已渲染的 KaTeX HTML)
+            if (/<[a-zA-Z]/.test(trimmed)) return match;
             if (!/\\[a-zA-Z]/.test(trimmed)) return match;
             hasFormula = true;
             try {
-              return katex.renderToString(trimmed, { displayMode: true, throwOnError: false });
+              return katex.renderToString(normalizeMathSource(trimmed), { displayMode: true, throwOnError: false, macros: SIUNITX_MACROS });
             } catch { return match; }
           });
 
@@ -333,12 +695,16 @@
           // (?<!\w) 防止误匹配 \left(...) 中 t 后面的 ( 以及 f(x) 等函数调用
           resultHTML = resultHTML.replace(/(?<!\w)\(([^()]*(?:\([^()]*\)[^()]*)*)\)(?!\w)/g, (match, formula) => {
             const trimmed = formula.trim();
+            // 跳过已含 HTML 标签的内容: $...$ 步骤已将公式渲染为 KaTeX HTML,
+            // MathML annotation 里的 \cmd 和 style 里的 '-' 会误触发此分支,
+            // 导致整段 KaTeX HTML 被当作 LaTeX 再次渲染成乱码
+            if (/<[a-zA-Z]/.test(trimmed)) return match;
             const cmdCount = (trimmed.match(/\\[a-zA-Z]+/g) || []).length;
             const hasMathOp = /[=+\-^_<>]/.test(trimmed);
             if (cmdCount < 1 || (cmdCount < 2 && !hasMathOp)) return match;
             hasFormula = true;
             try {
-              return katex.renderToString(trimmed, { displayMode: false, throwOnError: false });
+              return katex.renderToString(normalizeMathSource(trimmed), { displayMode: false, throwOnError: false, macros: SIUNITX_MACROS });
             } catch { return match; }
           });
 
@@ -685,6 +1051,8 @@
       debounceTimer = setTimeout(() => {
         highlightAllCode();
         renderLaTeX();
+        renderBlockDisplayMath();
+        repairKatexErrors();
         scanAndAddCopyButtons();
       }, DEBOUNCE_DELAY);
     });
@@ -857,6 +1225,8 @@
     setupDOMInspector();
     highlightAllCode();
     renderLaTeX();
+    renderBlockDisplayMath();
+    repairKatexErrors();
     scanAndAddCopyButtons();
   }
 
