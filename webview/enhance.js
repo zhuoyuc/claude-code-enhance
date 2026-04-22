@@ -55,10 +55,14 @@
     "\\liter": "\\text{L}", "\\litre": "\\text{L}",
     "\\minute": "\\text{min}", "\\hour": "\\text{h}",
     "\\day": "\\text{d}", "\\electronvolt": "\\text{eV}",
-    "\\bar": "\\text{bar}", "\\degree": "^{\\circ}",
     // 修饰符
-    "\\per": "/", "\\square": "^{2}", "\\cubic": "^{3}",
+    "\\per": "/", "\\cubic": "^{3}",
     "\\squared": "^{2}", "\\cubed": "^{3}",
+    // NOT defined (冲突 KaTeX 原生命名, 若强行定义会破坏标准用法):
+    //   \bar    — KaTeX 内置重音 (X̄), 不要重定义为 siunitx 的 bar 压强单位
+    //   \square — KaTeX 内置空心方符号 □, 不要重定义为平方 ^2
+    //   \degree — KaTeX 内置 ° 符号, 不要重定义为 ^\circ
+    // 若确实要 siunitx 单位, 用 \text{bar} / \mathrm{bar} / ^{\circ} 明示.
   };
 
   // ========================================================================
