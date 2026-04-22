@@ -1426,10 +1426,25 @@
     });
   }
 
-  // 强制刷新: 清除所有 "已处理" 标记后重跑全部增强 pass
-  // 解决: 有时候因为加载竞态, 初次渲染时 KaTeX 还未就绪或 observer 漏触发,
-  // 需要关闭重开面板才能看到正确渲染. 本快捷键不用关面板, 手动重跑一次.
+  // 强制刷新 — 双击升级机制:
+  //   1 次按 (软刷新): 清 flag + 重跑所有 pass. 对 DOM 已有原始 $...$/占位符的
+  //                    情况有效.
+  //   2 秒内再按 1 次 (硬刷新): window.location.reload() 彻底重载 webview,
+  //                            等价于手动关闭 ×  重开面板. 适用于 capture hook
+  //                            漏掉了某些 payload (已被 CC marked 吃掉反斜杠, DOM
+  //                            里的内容已经物理 mangled, 只能 reload 重新走流程).
+  let __lastRefreshTs = 0;
   function forceRefreshRendering() {
+    const now = Date.now();
+    if (now - __lastRefreshTs < 2000) {
+      // 2 秒内双击 → 硬刷新
+      showNotification('硬刷新: 重载 webview (相当于关闭重开面板)...');
+      console.log('[Claude Enhance] Hard refresh: window.location.reload()');
+      setTimeout(() => window.location.reload(), 200);
+      return;
+    }
+    __lastRefreshTs = now;
+
     // 1. 清除防重入标记
     document.querySelectorAll('[data-claude-block-math]').forEach(el => {
       try { delete el.dataset.claudeBlockMath; } catch (_) {}
@@ -1452,7 +1467,7 @@
 
     const msgCount = window.__enhanceMsgLog ? window.__enhanceMsgLog.length : 0;
     const mathCount = window.__enhanceMathStore ? window.__enhanceMathStore.size : 0;
-    const msg = `强制刷新完成. ${passes} passes, ${mathCount} 个数学占位符, ${msgCount} 条捕获消息`;
+    const msg = `软刷新完成 (${passes} passes, ${mathCount} 占位符, ${msgCount} 消息). 若公式仍未渲染, 2 秒内再按一次 Ctrl+Shift+R 硬刷新`;
     showNotification(msg);
     console.log('[Claude Enhance] ' + msg);
   }
