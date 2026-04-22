@@ -197,11 +197,26 @@
     // A2. 零参数数学符号后直接跟 {letters}: 几乎一定是下标被吞
     //     \varepsilon{yy} → \varepsilon_{yy}
     tex = tex.replace(ZERO_ARG_SUB_RE, '$1_{$2}');
-    // B. 大运算符后直接接 \text/\mathrm  → 加 _
-    //    \int\text{top} → \int_\text{top}
+    // A3. 大运算符后直接跟 {group}: 必是下标 _ 被吞
+    //     \sum{k=1}^{N} → \sum_{k=1}^{N}
     tex = tex.replace(
-      /(\\(?:int|oint|iint|iiint|sum|prod|coprod|bigcup|bigcap|bigoplus|bigotimes))\s*(\\(?:text|mathrm|mathbf|mathit|mathsf|mathtt))\b/g,
+      /(\\(?:sum|prod|int|oint|iint|iiint|coprod|bigcup|bigcap|bigoplus|bigotimes|lim|inf|sup|max|min))\s*\{/g,
+      '$1_{'
+    );
+    // A4. 粗体/花体 {X} 后直接跟单字母 → {X}_letter
+    //     \mathbf{C}k → \mathbf{C}_k  \mathcal{O}n → \mathcal{O}_n
+    //     仅对数学变量字体: mathbf/mathcal/mathbb/mathfrak/bm/boldsymbol
+    //     不含 \text/\mathrm/\mathsf/\mathtt/\mathit (会误伤 \mathrm{d}x 微分等)
+    tex = tex.replace(
+      /(\\(?:mathbf|mathcal|mathbb|mathfrak|bm|boldsymbol)\{[^{}]+\})([A-Za-z])(?![A-Za-z])/g,
       '$1_$2'
+    );
+    // B. 大运算符后直接接 \text/\mathrm{MULTI-CHAR} → 加 _
+    //    \int\text{top} → \int_\text{top}
+    //    但 \int \mathrm{d}x (微分 d) 不改 — 所以 require arg 长度 ≥ 2
+    tex = tex.replace(
+      /(\\(?:int|oint|iint|iiint|sum|prod|coprod|bigcup|bigcap|bigoplus|bigotimes))\s*(\\(?:text|mathrm|mathbf|mathit|mathsf|mathtt))\{([^{}]{2,})\}/g,
+      '$1_$2{$3}'
     );
     // C. 变量/闭括号后 |\text/\mathrm → |_\text  (eval-bar 下标)
     //    \mathbf{u}|\text{prescribed} → \mathbf{u}|_\text{prescribed}
@@ -751,7 +766,10 @@
               cleaned.includes('_') || cleaned.includes('^') || cleaned.includes('{') ||
               /\b(alpha|beta|gamma|delta|theta|lambda|mu|sigma|pi|omega|sum|int|frac|sqrt)\b/i.test(cleaned) ||
               // 单字母变量数学式: 含 = 且无连续小写字母(排除自然语言单词)
-              (cleaned.includes('=') && !/[a-z]{2,}/.test(cleaned));
+              (cleaned.includes('=') && !/[a-z]{2,}/.test(cleaned)) ||
+              // 逗号分隔的短变量列表: $C, E$ / $A, B, C$ / $u_0, v_0$
+              // 判据: 含逗号 且没有 3+ 连续小写字母 (排除 "hello, world" 这类自然语言)
+              (cleaned.includes(',') && !/[a-z]{3,}/.test(cleaned));
             if (!looksLikeLatex) return match;
             hasFormula = true;
             try {

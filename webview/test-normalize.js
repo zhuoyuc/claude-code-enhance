@@ -143,12 +143,26 @@ function restoreMissingSubscript(tex) {
   tex = tex.replace(/(\\(?:[Bb]ig{1,2}|left|right)\s*\|)(?=[A-Za-z\\])/g, '$1_');
   // A2. 零参数数学符号后直接跟 {letters}: 几乎一定是下标 _ 被吞
   tex = tex.replace(ZERO_ARG_SUB_RE, '$1_{$2}');
-
-  // B. 大运算符 \int/\sum/... 后直接接 \text/\mathrm → 加 _
-  //    \int\text{top} → \int_\text{top}
+  // A3. 大运算符 \sum / \prod / \int 等后直接跟 {group}: 必是下标 _ 被吞
+  //     \sum{k=1}^{N} → \sum_{k=1}^{N}
   tex = tex.replace(
-    /(\\(?:int|oint|iint|iiint|sum|prod|coprod|bigcup|bigcap|bigoplus|bigotimes))\s*(\\(?:text|mathrm|mathbf|mathit|mathsf|mathtt))\b/g,
+    /(\\(?:sum|prod|int|oint|iint|iiint|coprod|bigcup|bigcap|bigoplus|bigotimes|lim|inf|sup|max|min))\s*\{/g,
+    '$1_{'
+  );
+  // A4. 粗体/花体字体命令 {X} 后直接跟单字母 → {X}_letter  (e.g. \mathbf{C}k → \mathbf{C}_k)
+  //     仅对表示数学变量的粗体/花体: \mathbf \mathcal \mathbb \mathfrak \bm \boldsymbol
+  //     不包括 \text / \mathrm / \mathsf / \mathtt / \mathit (会误伤 \mathrm{d}x 等)
+  tex = tex.replace(
+    /(\\(?:mathbf|mathcal|mathbb|mathfrak|bm|boldsymbol)\{[^{}]+\})([A-Za-z])(?![A-Za-z])/g,
     '$1_$2'
+  );
+
+  // B. 大运算符 \int/\sum/... 后直接接 \text/\mathrm{MULTI-CHAR} → 加 _
+  //    \int\text{top} → \int_\text{top}
+  //    但 \int \mathrm{d}x (微分 d) 不改 — 所以 require arg 长度 ≥ 2
+  tex = tex.replace(
+    /(\\(?:int|oint|iint|iiint|sum|prod|coprod|bigcup|bigcap|bigoplus|bigotimes))\s*(\\(?:text|mathrm|mathbf|mathit|mathsf|mathtt))\{([^{}]{2,})\}/g,
+    '$1_$2{$3}'
   );
 
   // C. 变量/闭括号后 |\text/\mathrm → |_\text (eval bar 下标)
@@ -310,6 +324,46 @@ const cases = [
     name: '\\frac{a}{b} 不能误改 (frac 有 2 个参数)',
     in:  '\\frac{a}{b} + \\sigma{ij}',
     out: '\\frac{a}{b} + \\sigma_{ij}',
+  },
+
+  // ---------- 新增: 大运算符缺 _, 粗体命令后字母缺 _ ----------
+  {
+    name: '\\sum{k=1}^{N_k} 缺下标',
+    in:  '\\sum{k=1}^{N_k} h(\\eta_k)',
+    out: '\\sum_{k=1}^{N_k} h(\\eta_k)',
+  },
+  {
+    name: '\\prod{...} 缺下标',
+    in:  '\\prod{i=1}^n x_i',
+    out: '\\prod_{i=1}^n x_i',
+  },
+  {
+    name: '\\mathbf{C}k 缺下标 (粗体字母后单字母)',
+    in:  '\\mathbf{C}(x) = \\sum_k h(\\eta_k)\\mathbf{C}k',
+    out: '\\mathbf{C}(x) = \\sum_k h(\\eta_k)\\mathbf{C}_k',
+  },
+  {
+    name: '\\mathcal{O}n → \\mathcal{O}_n',
+    in:  '\\mathcal{O}n',
+    out: '\\mathcal{O}_n',
+  },
+  {
+    name: '\\mathrm{d}x 保留 (rm 不是粗体, 不触发)',
+    in:  '\\int \\mathrm{d}x = x',
+    out: '\\int \\mathrm{d}x = x',
+  },
+  {
+    name: '\\mathbf{A}(x) 保留 (后面是括号不是字母)',
+    in:  '\\mathbf{A}(x) = 0',
+    out: '\\mathbf{A}(x) = 0',
+  },
+
+  // ---------- 新增: $C, E$ 短变量列表 (在 renderLaTeX 的 looksLikeLatex 里判定) ----------
+  // 这里只验 normalizeMathSource 对 "C, E" 纯 pass-through (它不应插 \,)
+  {
+    name: '短变量列表 C, E 不被 restoreMathSpacing 误改',
+    in:  'C, E',
+    out: 'C, E',
   },
 ];
 
