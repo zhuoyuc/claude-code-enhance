@@ -331,10 +331,28 @@
       /* KaTeX 样式 */
       .katex {
         font-size: 1.1em;
+        /* 防止行内公式在窄容器 (如表格单元格) 里换行 */
+        white-space: nowrap;
       }
       .katex-display {
         margin: 1em 0;
         overflow-x: auto;
+      }
+      /* 表格里的 display 公式: 不要打断单元格内容流
+         \[...\] 或 $$...$$ 写在 table cell 里, 默认 block-level 会占满整行,
+         把后面紧跟的文本挤到下一行. 这里强制 inline-block 保持流. */
+      table .katex-display,
+      td .katex-display,
+      th .katex-display {
+        display: inline-block !important;
+        margin: 0 !important;
+        padding: 0 !important;
+        vertical-align: middle;
+        text-align: left;
+      }
+      table .katex-display > .katex {
+        display: inline-block;
+        text-align: left;
       }
 
       /* 列表样式 - 修复数字被截断 */
