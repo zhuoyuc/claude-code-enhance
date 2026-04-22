@@ -1182,15 +1182,55 @@
         changed: fixed !== src,
       });
     });
+
+    // NEW: 导出 timelineMessage 里所有含 $ / \( / \[ 但 *未被 KaTeX 渲染* 的 text node
+    // 配合父元素链路, 用来定位为什么 renderLaTeX 漏掉某个公式
+    const unrendered = [];
+    const msgContainers = document.querySelectorAll(MATH_ALLOW_SELECTOR);
+    msgContainers.forEach(container => {
+      const walker = document.createTreeWalker(container, NodeFilter.SHOW_TEXT);
+      let n;
+      while (n = walker.nextNode()) {
+        const t = n.textContent;
+        if (!t) continue;
+        const hasMathMarker = t.includes('$') || t.includes('\\(') || t.includes('\\[');
+        const hasBackslashCmd = /\\[a-zA-Z]{2,}/.test(t);
+        const hasLikelyMangled = /\|(neq|varepsilon|sigma|delta|frac|text|bm|leq|geq|sum|int)/.test(t);
+        if (!hasMathMarker && !hasBackslashCmd && !hasLikelyMangled) continue;
+        // Skip if inside .katex (already rendered)
+        if (n.parentElement && n.parentElement.closest('.katex')) continue;
+        // 构造 parent ancestor chain (上溯 6 层)
+        const chain = [];
+        let el = n.parentElement;
+        for (let k = 0; k < 6 && el; k++) {
+          chain.push(el.tagName + (el.className ? '.' + String(el.className).split(/\s+/).slice(0, 3).join('.') : ''));
+          el = el.parentElement;
+        }
+        // Determine if scope filters would reject
+        const p = n.parentElement;
+        const inScope = p && p.closest(MATH_ALLOW_SELECTOR) && !p.closest(MATH_DENY_SELECTOR);
+        unrendered.push({
+          i: unrendered.length,
+          text: t.length > 300 ? t.slice(0, 300) + '…' : t,
+          len: t.length,
+          inScope: !!inScope,
+          deniedBy: p && p.closest(MATH_DENY_SELECTOR) ? p.closest(MATH_DENY_SELECTOR).className || p.closest(MATH_DENY_SELECTOR).tagName : null,
+          parents: chain,
+        });
+      }
+    });
+
     const out = JSON.stringify({
       timestamp: new Date().toISOString(),
       totalKatex: nodes.length,
-      inScope: items.length,
-      items: items,
+      rendered: items.length,
+      unrenderedCount: unrendered.length,
+      renderedSamples: items.slice(0, 50),
+      unrendered: unrendered.slice(0, 50),
     }, null, 2);
     navigator.clipboard.writeText(out).then(() => {
-      showNotification(`KaTeX 源码 (${items.length} 个公式) 已复制. 粘贴给 Claude.`);
-      console.log('[Claude Enhance] Exported', items.length, 'KaTeX sources');
+      showNotification(`渲染: ${items.length}, 未渲染但含数学标记: ${unrendered.length}`);
+      console.log(`[Claude Enhance] Exported ${items.length} rendered, ${unrendered.length} unrendered math-like texts`);
     }).catch(err => {
       console.error('[Claude Enhance] Copy failed:', err);
       console.log(out);
