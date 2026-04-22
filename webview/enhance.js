@@ -130,6 +130,27 @@
   const __enhanceMsgLog = [];
   const __enhanceMsgLogMax = 30;
 
+  // Session 活跃状态跟踪 — 用于 hard reload 前检查是否会中断 AI 流式响应
+  // 每当 CC 发 session_states_update 消息就更新这张表
+  const __sessionStates = new Map();  // sessionId → state string
+  function updateSessionStates(payload) {
+    let req = null;
+    if (payload && payload.request && payload.request.type === 'session_states_update') req = payload.request;
+    if (!req || !Array.isArray(req.sessions)) return;
+    __sessionStates.clear();
+    for (const s of req.sessions) {
+      if (s && s.sessionId) __sessionStates.set(s.sessionId, s.state || 'unknown');
+    }
+  }
+  function isAnySessionActive() {
+    for (const [, state] of __sessionStates) {
+      // "idle" = 空闲; 其他全部视为活跃 (processing / streaming / waiting / etc.)
+      if (state && state !== 'idle') return { active: true, state };
+    }
+    return { active: false };
+  }
+  window.__enhanceSessionStates = __sessionStates;
+
   try {
     window.addEventListener('message', function __enhanceCaptureListener(ev) {
       if (!ev || !ev.data) return;
@@ -144,6 +165,8 @@
           });
           while (__enhanceMsgLog.length > __enhanceMsgLogMax) __enhanceMsgLog.shift();
         } catch (_) {}
+        // 跟踪 session 活跃状态 (用于 hard reload 前的保护)
+        updateSessionStates(payload);
         // 然后原地 mutate: 把 $...$ 和 $$...$$ 替换为占位符
         protectPayload(payload);
       } catch (e) {
@@ -1438,6 +1461,27 @@
     const now = Date.now();
     if (now - __lastRefreshTs < 2000) {
       // 2 秒内双击 → 硬刷新
+      // 安全检查: 若有 session 正在响应 (AI streaming / 工具调用中), 弹窗警告
+      // 工具执行 (Bash/文件/训练脚本) 跑在 extension host, reload 不会影响.
+      // 但 AI 流式文本是 webview 实时接收, reload 会导致消息重新请求,
+      // 有可能丢失中间流式内容.
+      const active = isAnySessionActive();
+      let confirmed = true;
+      if (active.active) {
+        confirmed = window.confirm(
+          '硬刷新警告\n\n' +
+          `检测到当前有 session 处于活跃状态 (state: ${active.state}).\n` +
+          '这通常意味着 AI 正在流式响应 或 工具正在运行.\n\n' +
+          '• 工具执行 (Bash/文件/训练) 跑在 extension 后端, reload 不会中断.\n' +
+          '• 但 AI 流式文本可能会丢失中间内容.\n\n' +
+          '确认硬刷新?'
+        );
+      }
+      if (!confirmed) {
+        showNotification('已取消硬刷新 (session 活跃中)');
+        __lastRefreshTs = now;  // 重新起计时, 下次双击仍需 2 秒内
+        return;
+      }
       showNotification('硬刷新: 重载 webview (相当于关闭重开面板)...');
       console.log('[Claude Enhance] Hard refresh: window.location.reload()');
       setTimeout(() => window.location.reload(), 200);
