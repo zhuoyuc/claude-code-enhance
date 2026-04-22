@@ -1418,7 +1418,43 @@
         e.preventDefault();
         exportMessageLog();
       }
+      // Ctrl+Shift+R 强制刷新全部渲染 — 清除所有 "已处理" 标记后重跑全部 pass
+      if (e.ctrlKey && e.shiftKey && e.key === 'R') {
+        e.preventDefault();
+        forceRefreshRendering();
+      }
     });
+  }
+
+  // 强制刷新: 清除所有 "已处理" 标记后重跑全部增强 pass
+  // 解决: 有时候因为加载竞态, 初次渲染时 KaTeX 还未就绪或 observer 漏触发,
+  // 需要关闭重开面板才能看到正确渲染. 本快捷键不用关面板, 手动重跑一次.
+  function forceRefreshRendering() {
+    // 1. 清除防重入标记
+    document.querySelectorAll('[data-claude-block-math]').forEach(el => {
+      try { delete el.dataset.claudeBlockMath; } catch (_) {}
+    });
+    document.querySelectorAll('[data-claude-repaired]').forEach(el => {
+      try { el.removeAttribute('data-claude-repaired'); } catch (_) {}
+    });
+
+    // 2. 清除 renderLaTeX 的锁 (防止"正在渲染"状态卡住)
+    window._claudeRenderingLaTeX = false;
+
+    // 3. 依次重跑所有增强 pass (和 observer 回调顺序一致)
+    let passes = 0;
+    try { if (typeof highlightAllCode === 'function') { highlightAllCode(); passes++; } } catch (e) { console.warn('[refresh] hljs:', e); }
+    try { if (typeof renderLaTeX === 'function') { renderLaTeX(); passes++; } } catch (e) { console.warn('[refresh] latex:', e); }
+    try { if (typeof renderMathPlaceholders === 'function') { renderMathPlaceholders(); passes++; } } catch (e) { console.warn('[refresh] placeholders:', e); }
+    try { if (typeof renderBlockDisplayMath === 'function') { renderBlockDisplayMath(); passes++; } } catch (e) { console.warn('[refresh] block display:', e); }
+    try { if (typeof repairKatexErrors === 'function') { repairKatexErrors(); passes++; } } catch (e) { console.warn('[refresh] repair:', e); }
+    try { if (typeof scanAndAddCopyButtons === 'function') { scanAndAddCopyButtons(); passes++; } } catch (e) { console.warn('[refresh] copy btn:', e); }
+
+    const msgCount = window.__enhanceMsgLog ? window.__enhanceMsgLog.length : 0;
+    const mathCount = window.__enhanceMathStore ? window.__enhanceMathStore.size : 0;
+    const msg = `强制刷新完成. ${passes} passes, ${mathCount} 个数学占位符, ${msgCount} 条捕获消息`;
+    showNotification(msg);
+    console.log('[Claude Enhance] ' + msg);
   }
 
   // Phase 1: 导出 from-extension 消息 payload
