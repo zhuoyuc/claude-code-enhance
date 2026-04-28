@@ -1449,46 +1449,13 @@
     });
   }
 
-  // 强制刷新 — 双击升级机制:
-  //   1 次按 (软刷新): 清 flag + 重跑所有 pass. 对 DOM 已有原始 $...$/占位符的
-  //                    情况有效.
-  //   2 秒内再按 1 次 (硬刷新): window.location.reload() 彻底重载 webview,
-  //                            等价于手动关闭 ×  重开面板. 适用于 capture hook
-  //                            漏掉了某些 payload (已被 CC marked 吃掉反斜杠, DOM
-  //                            里的内容已经物理 mangled, 只能 reload 重新走流程).
-  let __lastRefreshTs = 0;
+  // 强制刷新 — 软刷新单档版本.
+  //   清 flag + 重跑所有 pass. 不调用 window.location.reload(),
+  //   因为 VSCode webview 的资源 URL 带一次性 nonce, reload 后所有
+  //   asset 引用失效, 整个面板会变白屏.
+  //   如果软刷新无法解决(比如 Phase 2 capture-hook 漏接 payload, DOM 已
+  //   物理 mangled), 唯一可靠的办法是手动关闭 × 重新打开 Claude Code 面板.
   function forceRefreshRendering() {
-    const now = Date.now();
-    if (now - __lastRefreshTs < 2000) {
-      // 2 秒内双击 → 硬刷新
-      // 安全检查: 若有 session 正在响应 (AI streaming / 工具调用中), 弹窗警告
-      // 工具执行 (Bash/文件/训练脚本) 跑在 extension host, reload 不会影响.
-      // 但 AI 流式文本是 webview 实时接收, reload 会导致消息重新请求,
-      // 有可能丢失中间流式内容.
-      const active = isAnySessionActive();
-      let confirmed = true;
-      if (active.active) {
-        confirmed = window.confirm(
-          '硬刷新警告\n\n' +
-          `检测到当前有 session 处于活跃状态 (state: ${active.state}).\n` +
-          '这通常意味着 AI 正在流式响应 或 工具正在运行.\n\n' +
-          '• 工具执行 (Bash/文件/训练) 跑在 extension 后端, reload 不会中断.\n' +
-          '• 但 AI 流式文本可能会丢失中间内容.\n\n' +
-          '确认硬刷新?'
-        );
-      }
-      if (!confirmed) {
-        showNotification('已取消硬刷新 (session 活跃中)');
-        __lastRefreshTs = now;  // 重新起计时, 下次双击仍需 2 秒内
-        return;
-      }
-      showNotification('硬刷新: 重载 webview (相当于关闭重开面板)...');
-      console.log('[Claude Enhance] Hard refresh: window.location.reload()');
-      setTimeout(() => window.location.reload(), 200);
-      return;
-    }
-    __lastRefreshTs = now;
-
     // 1. 清除防重入标记
     document.querySelectorAll('[data-claude-block-math]').forEach(el => {
       try { delete el.dataset.claudeBlockMath; } catch (_) {}
@@ -1511,7 +1478,7 @@
 
     const msgCount = window.__enhanceMsgLog ? window.__enhanceMsgLog.length : 0;
     const mathCount = window.__enhanceMathStore ? window.__enhanceMathStore.size : 0;
-    const msg = `软刷新完成 (${passes} passes, ${mathCount} 占位符, ${msgCount} 消息). 若公式仍未渲染, 2 秒内再按一次 Ctrl+Shift+R 硬刷新`;
+    const msg = `刷新完成 (${passes} passes, ${mathCount} 占位符, ${msgCount} 消息). 仍有问题请关闭 × 重开面板`;
     showNotification(msg);
     console.log('[Claude Enhance] ' + msg);
   }
